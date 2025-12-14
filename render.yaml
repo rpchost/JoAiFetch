@@ -1,0 +1,44 @@
+databases:
+  - name: joai_db1
+    databaseName: joai_db1
+    user: joai_user1
+    plan: free # Free tier: 1 GB storage, expires after 90 days
+    ipAllowList: [] # Allow connections from any IP
+
+services:
+  - type: web
+    name: joai
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DB_CONNECTION
+        value: postgresql
+      - key: DATABASE_URL
+        fromDatabase:
+          name: joai_db1
+          property: connectionString
+
+# Cron Job 1: Update data every 30 minutes
+  - type: cron
+    name: joai-data-updater-30min
+    env: python
+    region: oregon
+    schedule: "*/30 * * * *"  # Every 30 minutes
+    buildCommand: pip install -r requirements.txt
+    startCommand: python update_data_cron.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+
+  # Cron Job 2: Update data every hour (backup/alternative)
+  - type: cron
+    name: joai-data-updater-hourly
+    env: python
+    region: oregon
+    schedule: "0 * * * *"  # Every hour at :00
+    buildCommand: pip install -r requirements.txt
+    startCommand: python update_data_cron.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false

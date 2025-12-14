@@ -1,0 +1,41 @@
+name: Update Crypto Data
+
+on:
+  schedule:
+    - cron: '0 * * * *'    # Every 1 hour
+  workflow_dispatch:         # Manual trigger
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4   # v4 is latest & fastest
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Upgrade pip & install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --no-cache-dir
+
+      # Critical: Remove any leftover .pyc or __pycache__ from old runs
+      - name: Clean Python cache
+        run: |
+          find . -type d -name "__pycache__" -exec rm -rf {} +
+          find . -type f -name "*.pyc" -delete
+
+      - name: Fetch & store BTCUSD data (direct Binance.US)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python fetch_data.py
+
+      - name: Done
+        run: echo "BTCUSD data updated successfully at $(date)"
+
+      - name: Update on-chain data & answer questions
+        run: python ai_analyst.py
