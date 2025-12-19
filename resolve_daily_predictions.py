@@ -29,9 +29,13 @@ PRETTY_NAME = {
 def get_yesterday_date() -> date:
     return (datetime.utcnow() - timedelta(days=1)).date()
 
+def get_prediction_generation_date() -> date:
+    """Date when the prediction was generated (2 days ago from now)"""
+    return (datetime.utcnow() - timedelta(days=2)).date()
+
 def resolve_predictions():
-    yesterday = get_yesterday_date()
-    print(f"Resolving predictions for {yesterday}")
+    prediction_date = get_prediction_generation_date()  # e.g., Dec 18 when running on Dec 20
+    print(f"Resolving predictions generated on {prediction_date} (for {prediction_date + timedelta(days=1)} candle)")
 
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -45,12 +49,12 @@ def resolve_predictions():
 
             # Step 1: Find unresolved prediction for this symbol + yesterday
             cur.execute("""
-                SELECT id, predicted_close 
-                FROM daily_predictions 
-                WHERE symbol = %s 
-                  AND date(predicted_at) = %s 
-                  AND resolved_at IS NULL
-            """, (symbol, yesterday))
+            SELECT id, predicted_close 
+            FROM daily_predictions 
+            WHERE symbol = %s 
+            AND date(predicted_at AT TIME ZONE 'UTC') = %s 
+            AND resolved_at IS NULL
+            """, (symbol, prediction_date))
 
             row = cur.fetchone()
             if not row:
