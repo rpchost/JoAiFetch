@@ -81,7 +81,8 @@ def get_prediction(symbol: str) -> dict | None:
             "predicted_open": o,
             "predicted_high": h,
             "predicted_low": l,
-            "predicted_close": c
+            "predicted_close": c,
+            "for_date": (datetime.utcnow() + timedelta(days=1)).date()
         }
 
     except requests.exceptions.Timeout:
@@ -109,11 +110,13 @@ def save_predictions_to_db(predictions: list[dict]):
             INSERT INTO daily_predictions (
                 symbol, timeframe,
                 predicted_open, predicted_high, predicted_low, predicted_close,
-                predicted_at
+                predicted_at,
+                for_date
             ) VALUES (
                 %(symbol)s, %(timeframe)s,
                 %(predicted_open)s, %(predicted_high)s, %(predicted_low)s, %(predicted_close)s,
-                NOW()
+                NOW(),
+                %(for_date)s
             )
             ON CONFLICT (symbol, (timezone('UTC', predicted_at)::date)) DO UPDATE SET
                 predicted_open = EXCLUDED.predicted_open,
