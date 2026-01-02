@@ -64,7 +64,7 @@ def resolve_predictions():
                 continue
 
             pred_id, pred_open, pred_high, pred_low, pred_close = pred_row
-            pred_close = float(pred_close);
+            pred_close = float(pred_close)
             print(f"Found pred (close ${pred_close:,.2f}) ", end="", flush=True)
 
             # Step 2: Get actual 1day candle for target_date
