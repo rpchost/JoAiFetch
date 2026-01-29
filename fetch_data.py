@@ -16,38 +16,39 @@ load_dotenv()
 TIMEFRAMES = {
     "1m": 1000,
     "5m": 1000,
-    "15m": 1000,
     "1h": 1000,
     "4h": 1000,
     "1d": 1000
 }
 
 DESIRED_COINS = [
-    "BTCUSD", "ETHUSD", "SOLUSD", "ADAUSD", "BNBUSD",
-    "XRPUSD", "DOGEUSD", "SHIBUSD", "PEPEUSD",
-    "LINKUSD", "AVAXUSD", "TONUSD"
+    "BTCUSD", "ETHUSD"
+    # , "SOLUSD", "ADAUSD", "BNBUSD",
+    # "XRPUSD", "DOGEUSD", "SHIBUSD", "PEPEUSD",
+    # "LINKUSD", "AVAXUSD", "TONUSD"
 ]
 
 SYMBOL_MAP = {
-    "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT",
-    "ADAUSD": "ADAUSDT", "BNBUSD": "BNBUSDT", "XRPUSD": "XRPUSDT",
-    "DOGEUSD": "DOGEUSDT", "SHIBUSD": "SHIBUSDT", "PEPEUSD": "PEPEUSDT",
-    "LINKUSD": "LINKUSDT", "AVAXUSD": "AVAXUSDT", "TONUSD": "TONUSDT"
+    "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT"
+    # , "SOLUSD": "SOLUSDT",
+    # "ADAUSD": "ADAUSDT", "BNBUSD": "BNBUSDT", "XRPUSD": "XRPUSDT",
+    # "DOGEUSD": "DOGEUSDT", "SHIBUSD": "SHIBUSDT", "PEPEUSD": "PEPEUSDT",
+    # "LINKUSD": "LINKUSDT", "AVAXUSD": "AVAXUSDT", "TONUSD": "TONUSDT"
 }
 
 PRETTY_NAME = {
     "BTCUSD": "Bitcoin",
     "ETHUSD": "Ethereum",
-    "SOLUSD": "Solana",
-    "ADAUSD": "Cardano",
-    "BNBUSD": "Binance Coin",
-    "XRPUSD": "Ripple",
-    "DOGEUSD": "Dogecoin",
-    "SHIBUSD": "Shiba Inu",
-    "PEPEUSD": "Pepe",
-    "LINKUSD": "Chainlink",
-    "AVAXUSD": "Avalanche",
-    "TONUSD": "Toncoin"
+    # "SOLUSD": "Solana",
+    # "ADAUSD": "Cardano",
+    # "BNBUSD": "Binance Coin",
+    # "XRPUSD": "Ripple",
+    # "DOGEUSD": "Dogecoin",
+    # "SHIBUSD": "Shiba Inu",
+    # "PEPEUSD": "Pepe",
+    # "LINKUSD": "Chainlink",
+    # "AVAXUSD": "Avalanche",
+    # "TONUSD": "Toncoin"
 }
 
 def fetch_ohlcv_direct(symbol: str, timeframe: str, limit: int = None, end_date=None):
