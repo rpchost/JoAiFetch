@@ -232,6 +232,37 @@ def save_personal_prediction_and_signal(cur, pred: dict):
 
     print(f" → Signal: {signal['direction']} (Conf: {signal['confidence_score']}%)")
 
+    #Generate signal based on the personal prediction model; make this signal customized, for
+    #example connect it only to daily predictions
+    cur.execute("SELECT LAST_INSERT_ID()")
+    signal_id = cur.fetchone()[0]
+
+    signal_data = {
+        "id": signal_id,
+        "symbol": pred["symbol"],
+        "direction": signal["direction"],
+        "entry_price": signal["entry_price"],
+        "target_price_1": signal["target_price_1"],
+        "stop_loss": signal["stop_loss"],
+        "confidence_score": signal["confidence_score"],
+        "status": "active",
+        "time_generated": datetime.now(timezone.utc).isoformat(),
+        # add more fields
+    }
+
+    try:
+        response = requests.post(
+            "http://rpchost.com/broadcast-signal",
+            json={"signal": signal_data},
+            timeout=5
+        )
+        if response.status_code == 200:
+            print("Signal broadcasted to Laravel")
+        else:
+            print(f"Broadcast failed: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"Error broadcasting signal: {e}")
+    #end signal generation based on the personal model
 
 def get_custom_indicator_id_for_user(cur, user_id: int) -> int | None:
     """Get the ID of the user's live custom indicator (the personal model ID)"""
