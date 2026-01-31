@@ -1,12 +1,15 @@
 # resolve_personal_daily_predictions.py
 # Daily job: Resolve PERSONAL predictions + update linked signals
-# Supports optional date override via command line (YYYY-MM-DD)
+# Run once per day after midnight UTC
 
 import os
 import sys
 import psycopg2
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, date, timezone
 from dotenv import load_dotenv
+
+# Import Signals class from generate_signals.py
+from generate_signals import Signals
 
 load_dotenv()
 
@@ -15,68 +18,23 @@ if DATABASE_URL and "sslmode" not in DATABASE_URL:
     DATABASE_URL += "?sslmode=require"
 
 COINS = [
-    "BTCUSD", "ETHUSD", "SOLUSD", "ADAUSD", "BNBUSD",
-    "XRPUSD", "DOGEUSD", "SHIBUSD", "PEPEUSD",
-    "LINKUSD", "AVAXUSD", "TONUSD"
+    "BTCUSD", "ETHUSD", 
+    # "SOLUSD", "ADAUSD", "BNBUSD",
+    # "XRPUSD", "DOGEUSD", "SHIBUSD", "PEPEUSD",
+    # "LINKUSD", "AVAXUSD", "TONUSD"
 ]
 
 PRETTY_NAME = {
-    "BTCUSD": "Bitcoin", "ETHUSD": "Ethereum", "SOLUSD": "Solana",
-    "ADAUSD": "Cardano", "BNBUSD": "Binance Coin", "XRPUSD": "Ripple",
-    "DOGEUSD": "Dogecoin", "SHIBUSD": "Shiba Inu", "PEPEUSD": "Pepe",
-    "LINKUSD": "Chainlink", "AVAXUSD": "Avalanche", "TONUSD": "Toncoin"
+    "BTCUSD": "Bitcoin", "ETHUSD": "Ethereum", 
+    # "SOLUSD": "Solana",
+    # "ADAUSD": "Cardano", "BNBUSD": "Binance Coin", "XRPUSD": "Ripple",
+    # "DOGEUSD": "Dogecoin", "SHIBUSD": "Shiba Inu", "PEPEUSD": "Pepe",
+    # "LINKUSD": "Chainlink", "AVAXUSD": "Avalanche", "TONUSD": "Toncoin"
 }
 
-def update_signal_with_resolution(cur, personal_prediction_id: int, accuracy_score: float, 
-                                 direction_correct: bool, actual_close: float, pred_close: float):
-    """
-    Update the linked personal signal with final accuracy and derived status.
-    Handles missing target_price_1 / stop_loss gracefully.
-    """
-    # Fetch the signal (if exists)
-    cur.execute("""
-        SELECT id, target_price_1, stop_loss, direction
-        FROM signals
-        WHERE personal_prediction_id = %s
-        LIMIT 1
-    """, (personal_prediction_id,))
-    
-    signal_row = cur.fetchone()
-    if not signal_row:
-        print("  No linked signal found → skipping update")
-        return
-
-    signal_id, target_price_1, stop_loss, direction = signal_row
-
-    # Safety: if target or SL is missing → default to expired (no crash)
-    if target_price_1 is None or stop_loss is None:
-        status = 'expired'
-        print(f"  Signal missing target/SL → marked as expired")
-    else:
-        # Derive final status (only if values exist)
-        status = 'expired'
-        if direction == 'LONG':
-            if actual_close >= target_price_1:
-                status = 'hit_target'
-            elif actual_close <= stop_loss:
-                status = 'hit_sl'
-        elif direction == 'SHORT':
-            if actual_close <= target_price_1:
-                status = 'hit_target'
-            elif actual_close >= stop_loss:
-                status = 'hit_sl'
-
-    # Update signal (safe even if target/SL were NULL)
-    cur.execute("""
-        UPDATE signals
-        SET 
-            accuracy_score = %s,
-            status = %s,
-            updated_at = NOW()
-        WHERE id = %s
-    """, (round(accuracy_score, 4), status, signal_id))
-
-    print(f" → Signal updated: {status} (Acc: {accuracy_score:.1%})")
+def get_prediction_generation_date() -> date:
+    """Date when the prediction was generated (2 days ago from now)"""
+    return (datetime.utcnow() - timedelta(days=2)).date()
 
 def resolve_personal_predictions(target_for_date=None):
     """
@@ -93,8 +51,13 @@ def resolve_personal_predictions(target_for_date=None):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
+        
+        # Initialize Signals class (shared DB connection)
+        signal_gen = Signals()
 
-        # Fetch unresolved predictions
+        resolved_count = 0
+
+        # Fetch unresolved personal predictions
         cur.execute("""
             SELECT 
                 id, user_id, symbol, 
@@ -110,9 +73,7 @@ def resolve_personal_predictions(target_for_date=None):
             print(f"No unresolved personal predictions found for for_date = {target_for_date}")
             return
 
-        print(f"Found {len(rows)} predictions to resolve")
-
-        resolved_count = 0
+        print(f"Found {len(rows)} personal predictions to resolve")
 
         # Timestamp range for the actual daily candle
         day_start = datetime(target_for_date.year, target_for_date.month, target_for_date.day, tzinfo=timezone.utc)
@@ -177,12 +138,16 @@ def resolve_personal_predictions(target_for_date=None):
                 pred_id
             ))
 
-            # Step 5: Update linked signal (if exists)
+            # Step 5: Resolve linked signal using Signals.resolve
             direction_correct = (pred_close > pred_open) == (actual_close > actual_open)
             arrow = " ↑" if direction_correct else " ↓"
 
-            update_signal_with_resolution(cur, pred_id, accuracy_score, direction_correct, 
-                                         actual_close, pred_close)
+            result = signal_gen.resolve(pred_id, actual_close)
+            
+            if result['success']:
+                print(f"→ Signal resolved: {result['status']} | Actual close: ${actual_close:,.2f}")
+            else:
+                print(f"→ {result['reason']}")
 
             print(f"→ Resolved! Actual close: ${actual_close:,.2f} | "
                   f"Accuracy: {accuracy_score:.1%}{arrow}")
@@ -217,7 +182,7 @@ def main():
             print("Invalid date format. Use YYYY-MM-DD")
             sys.exit(1)
     else:
-        print("Auto mode: Resolving yesterday's predictions")
+        print("Auto mode: Resolving yesterday's personal predictions")
 
     resolve_personal_predictions(target_for_date)
 
@@ -230,10 +195,8 @@ if __name__ == "__main__":
     main()
 
 # # resolve_personal_daily_predictions.py
-# # Daily job: Resolve PERSONAL predictions with actual data
-# # Now supports optional date override to resolve a specific for_date
-# # resolve_personal_daily_predictions.py
-# # Resolve PERSONAL predictions for a specific for_date (or yesterday by default)
+# # Daily job: Resolve PERSONAL predictions + update linked signals
+# # Supports optional date override via command line (YYYY-MM-DD)
 
 # import os
 # import sys
@@ -260,9 +223,60 @@ if __name__ == "__main__":
 #     "LINKUSD": "Chainlink", "AVAXUSD": "Avalanche", "TONUSD": "Toncoin"
 # }
 
+# def update_signal_with_resolution(cur, personal_prediction_id: int, accuracy_score: float, 
+#                                  direction_correct: bool, actual_close: float, pred_close: float):
+#     """
+#     Update the linked personal signal with final accuracy and derived status.
+#     Handles missing target_price_1 / stop_loss gracefully.
+#     """
+#     # Fetch the signal (if exists)
+#     cur.execute("""
+#         SELECT id, target_price_1, stop_loss, direction
+#         FROM signals
+#         WHERE personal_prediction_id = %s
+#         LIMIT 1
+#     """, (personal_prediction_id,))
+    
+#     signal_row = cur.fetchone()
+#     if not signal_row:
+#         print("  No linked signal found → skipping update")
+#         return
+
+#     signal_id, target_price_1, stop_loss, direction = signal_row
+
+#     # Safety: if target or SL is missing → default to expired (no crash)
+#     if target_price_1 is None or stop_loss is None:
+#         status = 'expired'
+#         print(f"  Signal missing target/SL → marked as expired")
+#     else:
+#         # Derive final status (only if values exist)
+#         status = 'expired'
+#         if direction == 'LONG':
+#             if actual_close >= target_price_1:
+#                 status = 'hit_target'
+#             elif actual_close <= stop_loss:
+#                 status = 'hit_sl'
+#         elif direction == 'SHORT':
+#             if actual_close <= target_price_1:
+#                 status = 'hit_target'
+#             elif actual_close >= stop_loss:
+#                 status = 'hit_sl'
+
+#     # Update signal (safe even if target/SL were NULL)
+#     cur.execute("""
+#         UPDATE signals
+#         SET 
+#             accuracy_score = %s,
+#             status = %s,
+#             updated_at = NOW()
+#         WHERE id = %s
+#     """, (round(accuracy_score, 4), status, signal_id))
+
+#     print(f" → Signal updated: {status} (Acc: {accuracy_score:.1%})")
+
 # def resolve_personal_predictions(target_for_date=None):
 #     """
-#     Resolve personal predictions for the given for_date.
+#     Resolve personal predictions for the given for_date + update linked signals.
 #     If None, defaults to yesterday.
 #     """
 #     if target_for_date is None:
@@ -276,7 +290,7 @@ if __name__ == "__main__":
 #         conn = psycopg2.connect(DATABASE_URL)
 #         cur = conn.cursor()
 
-#         # Fetch unresolved predictions for the target for_date
+#         # Fetch unresolved predictions
 #         cur.execute("""
 #             SELECT 
 #                 id, user_id, symbol, 
@@ -312,7 +326,7 @@ if __name__ == "__main__":
 #             coin_name = PRETTY_NAME.get(symbol, symbol)
 #             print(f"  User {user_id} [{coin_name}] ", end="", flush=True)
 
-#             # Fetch actual daily candle using reliable timestamp range
+#             # Step 2: Get actual daily candle
 #             cur.execute("""
 #                 SELECT open, high, low, close
 #                 FROM crypto_candles
@@ -331,22 +345,16 @@ if __name__ == "__main__":
 
 #             actual_open, actual_high, actual_low, actual_close = [float(x) for x in actual_row]
 
-#             # Accuracy score
+#             # Step 3: Calculate accuracy
 #             if actual_close == 0:
 #                 accuracy_score = 0.0
 #             else:
 #                 error = abs(pred_close - actual_close) / actual_close
 #                 accuracy_score = max(0.0, 1.0 - error)
 
-#             # Direction correct
-#             predicted_up = pred_close > pred_open
-#             actual_up = actual_close > actual_open
-#             direction_correct = predicted_up == actual_up
+#             accuracy_score = round(accuracy_score, 4)
 
-#             arrow = " ↑" if direction_correct else " ↓"
-#             print(f"→ Resolved! Acc: {accuracy_score:.1%}{arrow} (Actual close: ${actual_close:,.2f})")
-
-#             # Save actuals and metrics
+#             # Step 4: Update prediction
 #             cur.execute("""
 #                 UPDATE personal_daily_predictions
 #                 SET 
@@ -360,10 +368,20 @@ if __name__ == "__main__":
 #                 WHERE id = %s
 #             """, (
 #                 actual_open, actual_high, actual_low, actual_close,
-#                 round(accuracy_score, 4),
-#                 direction_correct,
+#                 accuracy_score,
+#                 (pred_close > pred_open) == (actual_close > actual_open),
 #                 pred_id
 #             ))
+
+#             # Step 5: Update linked signal (if exists)
+#             direction_correct = (pred_close > pred_open) == (actual_close > actual_open)
+#             arrow = " ↑" if direction_correct else " ↓"
+
+#             update_signal_with_resolution(cur, pred_id, accuracy_score, direction_correct, 
+#                                          actual_close, pred_close)
+
+#             print(f"→ Resolved! Actual close: ${actual_close:,.2f} | "
+#                   f"Accuracy: {accuracy_score:.1%}{arrow}")
 
 #             resolved_count += 1
 
@@ -382,7 +400,7 @@ if __name__ == "__main__":
 
 # def main():
 #     print("=" * 80)
-#     print("JOAI PERSONAL PREDICTIONS RESOLVER")
+#     print("JOAI PERSONAL PREDICTIONS + SIGNALS RESOLVER")
 #     print(f"Run time (UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
 #     print("=" * 80)
 
@@ -390,7 +408,7 @@ if __name__ == "__main__":
 #     if len(sys.argv) > 1:
 #         try:
 #             target_for_date = datetime.strptime(sys.argv[1], "%Y-%m-%d").date()
-#             print(f"Manual override: Resolving predictions for for_date = {target_for_date}")
+#             print(f"Manual override: Resolving for_date = {target_for_date}")
 #         except ValueError:
 #             print("Invalid date format. Use YYYY-MM-DD")
 #             sys.exit(1)
@@ -402,6 +420,7 @@ if __name__ == "__main__":
 #     print("=" * 80)
 #     print("Personal resolution complete")
 #     print("=" * 80)
+
 
 # if __name__ == "__main__":
 #     main()
