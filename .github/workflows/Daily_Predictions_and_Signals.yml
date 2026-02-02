@@ -1,0 +1,27 @@
+name: Daily Predictions and Signals
+
+on:
+  schedule:
+    - cron: '15 0 * * *'  # 00:15 UTC daily
+
+jobs:
+  daily-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Generate predictions for TOMORROW
+      - name: Generate Global Predictions
+        run: python generate_daily_predictions.py
+      
+      - name: Generate Personal Predictions
+        run: python generate_personal_daily_predictions.py
+      
+      # 2. Generate signals from TOMORROW's predictions (unresolved)
+      - name: Generate Signals
+        run: python generate_signals.py
+      
+      # 3. Resolve YESTERDAY's predictions (and their signals)
+      - name: Resolve Global Predictions
+        run: python resolve_daily_predictions.py
+      
+      - name: Resolve Personal Predictions
+        run: python resolve_personal_daily_predictions.py
