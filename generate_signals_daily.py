@@ -1,23 +1,16 @@
-# generate_signals.py - HOURLY PREDICTION-BASED SIGNALS
-# New Logic:
-# 1. Hourly predictions drive signal generation
-# 2. Daily predictions provide confirmation (must align)
-# 3. Signals auto-close when next prediction disagrees
-# 4. Only one active signal per symbol+direction at a time
+# generate_signals.py - FIXED VERSION
+# Key changes:
+# 1. Direction is determined by comparing predicted_close to CURRENT price (not predicted_open)
+# 2. Added threshold to avoid noise
+# 3. Better logging for debugging
 
 """
-Signal Generation System for Crypto Trading Predictions (HOURLY-BASED)
+Signal Generation System for Crypto Trading Predictions (FIXED)
 
-Signal Generation Logic:
-1. Check if hourly and daily predictions ALIGN (candle direction):
-   - LONG alignment: predicted_close > predicted_open for BOTH timeframes
-   - SHORT alignment: predicted_close < predicted_open for BOTH timeframes
-2. Verify second criteria (current price vs hourly target):
-   - LONG: current_price < hourly predicted_close
-   - SHORT: current_price > hourly predicted_close
-3. Generate signal with target = hourly predicted_close
-4. Auto-close signals when predictions change direction
-5. Only one active signal per symbol+direction allowed
+Changes from original:
+- Direction now compares predicted_close to CURRENT price (not predicted_open)
+- Added 0.5% threshold to filter out noise
+- Improved logging for signal rejection reasons
 """
 
 import os
@@ -57,7 +50,6 @@ class SignalStatus(Enum):
     EXPIRED = "expired"
     CANCELLED = "cancelled"
     CLOSED = "closed"
-    PREDICTION_CHANGED = "prediction_changed"  # NEW: auto-closed due to prediction change
 
 
 # ==================== DATA CLASSES ====================
@@ -68,6 +60,9 @@ class SignalConfig:
     
     # Risk management - ATR multipliers
     atr_multiplier_sl: float = 1.5
+    atr_multiplier_tp1: float = 2.0
+    atr_multiplier_tp2: float = 3.0
+    atr_multiplier_tp3: float = 4.0
     
     # Confidence calculation
     base_confidence: float = 50.0
@@ -77,7 +72,7 @@ class SignalConfig:
     # Direction threshold (0.5% to avoid noise)
     direction_threshold_pct: float = 0.005  # 0.5%
     
-    # Signal expiry (not used in hourly mode, but kept for compatibility)
+    # Signal expiry
     default_expiry_hours: int = 24
     
     # Database connection pool
@@ -117,12 +112,14 @@ class SignalData:
     direction: SignalDirection
     entry_price: float
     target_price_1: float
+    target_price_2: Optional[float] = None
+    target_price_3: Optional[float] = None
     stop_loss: Optional[float] = None
     confidence_score: float = 50.0
     time_expiry: Optional[datetime] = None
     custom_indicator_id: Optional[int] = None
-    daily_prediction_id: Optional[int] = None
-    hourly_prediction_id: Optional[int] = None
+    daily_prediction_id_1hour: Optional[int] = None
+    daily_prediction_id_1day: Optional[int] = None
     personal_prediction_id_1hour: Optional[int] = None
     personal_prediction_id_1day: Optional[int] = None
 
@@ -133,11 +130,8 @@ class SignalGenerator:
     """
     Async signal generation and management system for crypto trading.
     
-    NEW LOGIC:
-    - Hourly predictions drive signal generation
-    - Daily predictions provide confirmation
-    - Signals auto-close when next prediction disagrees
-    - Only one active signal per symbol+direction
+    FIXED: Direction is now determined by comparing predicted_close to CURRENT price
+    (not predicted_open). This gives proper trading signals.
     """
     
     def __init__(
@@ -196,7 +190,6 @@ class SignalGenerator:
         stats = {
             'total_symbols': 0,
             'signals_generated': 0,
-            'signals_closed': 0,
             'signals_skipped': 0,
             'errors': 0,
             'details': []
@@ -209,11 +202,7 @@ class SignalGenerator:
             if prediction_type == 'personal' and not user_id:
                 raise ValueError("user_id required for personal predictions")
             
-            # STEP 1: Auto-close signals with misaligned predictions
-            close_stats = await self._auto_close_misaligned_signals(prediction_type, user_id, symbols, for_date)
-            stats['signals_closed'] = close_stats['closed']
-            
-            # STEP 2: Fetch predictions
+            # Fetch predictions
             if prediction_type == 'global':
                 predictions_by_symbol = await self._fetch_global_predictions_grouped(symbols, for_date)
             else:
@@ -222,7 +211,7 @@ class SignalGenerator:
             stats['total_symbols'] = len(predictions_by_symbol)
             logger.info(f"Processing {stats['total_symbols']} symbols for {prediction_type} signals")
             
-            # STEP 3: Generate signals concurrently
+            # Generate signals concurrently
             tasks = [
                 self._generate_signal_for_symbol(symbol, predictions, prediction_type == 'personal')
                 for symbol, predictions in predictions_by_symbol.items()
@@ -259,127 +248,12 @@ class SignalGenerator:
             
             logger.info(
                 f"Signal generation complete: {stats['signals_generated']} generated, "
-                f"{stats['signals_closed']} auto-closed, "
                 f"{stats['signals_skipped']} skipped, {stats['errors']} errors"
             )
             
         except Exception as e:
             logger.error(f"Critical error in generate(): {e}")
             raise
-        
-        return stats
-    
-    # ==================== AUTO-CLOSE MISALIGNED SIGNALS ====================
-    
-    async def _auto_close_misaligned_signals(
-        self,
-        prediction_type: str,
-        user_id: Optional[int],
-        symbols: Optional[List[str]],
-        for_date: Optional[datetime]
-    ) -> Dict[str, int]:
-        """
-        Auto-close active signals where predictions no longer align with signal direction
-        
-        Returns: Dict with count of closed signals
-        """
-        stats = {'closed': 0}
-        
-        try:
-            # Fetch active signals
-            async with self.pool.acquire() as conn:
-                if prediction_type == 'global':
-                    query = """
-                        SELECT 
-                            s.id, s.symbol, s.direction,
-                            s.daily_prediction_id, s.hourly_prediction_id
-                        FROM signals s
-                        WHERE s.status = 'active'
-                          AND s.personal_prediction_id IS NULL
-                    """
-                    params = []
-                    
-                    if symbols:
-                        query += " AND s.symbol = ANY($1)"
-                        params.append(symbols)
-                    
-                    signals = await conn.fetch(query, *params)
-                else:
-                    query = """
-                        SELECT 
-                            s.id, s.symbol, s.direction,
-                            s.personal_prediction_id_1day, s.personal_prediction_id_1hour
-                        FROM signals s
-                        INNER JOIN personal_daily_predictions p ON s.personal_prediction_id_1day = p.id
-                        WHERE s.status = 'active'
-                          AND p.user_id = $1
-                    """
-                    params = [user_id]
-                    
-                    if symbols:
-                        query += " AND s.symbol = ANY($2)"
-                        params.append(symbols)
-                    
-                    signals = await conn.fetch(query, *params)
-            
-            # Check each signal against current predictions
-            for signal in signals:
-                symbol = signal['symbol']
-                signal_direction = signal['direction']
-                signal_id = signal['id']
-                
-                # Fetch current predictions for this symbol
-                if prediction_type == 'global':
-                    predictions = await self._fetch_global_predictions_grouped([symbol], for_date)
-                else:
-                    predictions = await self._fetch_personal_predictions_grouped(user_id, [symbol], for_date)
-                
-                if symbol not in predictions:
-                    continue
-                
-                preds = predictions[symbol]
-                
-                # Check if we have both timeframes
-                if '1 hour' not in preds or '1 day' not in preds:
-                    continue
-                
-                # Get market data
-                market = await self._get_market_data(symbol)
-                if not market:
-                    continue
-                
-                # Check if predictions still align with signal
-                hourly_direction = self._determine_direction(preds['1 hour'])
-                daily_direction = self._determine_direction(preds['1 day'])
-                
-                should_close = False
-                
-                # Close if hourly prediction disagrees
-                if hourly_direction.value != signal_direction:
-                    should_close = True
-                    reason = f"Hourly prediction changed to {hourly_direction.value}"
-                
-                # Close if daily prediction disagrees
-                elif daily_direction.value != signal_direction:
-                    should_close = True
-                    reason = f"Daily prediction changed to {daily_direction.value}"
-                
-                # Close signal if misaligned
-                if should_close:
-                    async with self.pool.acquire() as conn:
-                        await conn.execute("""
-                            UPDATE signals
-                            SET 
-                                status = $1,
-                                updated_at = NOW()
-                            WHERE id = $2
-                        """, SignalStatus.PREDICTION_CHANGED.value, signal_id)
-                    
-                    stats['closed'] += 1
-                    logger.info(f"⚠️ Auto-closed signal #{signal_id} ({symbol} {signal_direction}): {reason}")
-        
-        except Exception as e:
-            logger.error(f"Error in auto-close: {e}")
         
         return stats
     
@@ -531,46 +405,37 @@ class SignalGenerator:
             timestamp=row['timestamp']
         )
     
-    # ==================== SIGNAL CALCULATION ====================
+    # ==================== SIGNAL CALCULATION (FIXED) ====================
     
     def _determine_direction(
         self, 
-        pred: PredictionData
+        pred: PredictionData,
+        current_price: float
     ) -> SignalDirection:
         """
-        Determine direction by comparing predicted_close to predicted_open
+        FIXED: Determine direction by comparing predicted_close to CURRENT price
         
-        CORRECT LOGIC:
-        - LONG: predicted_close > predicted_open (bullish candle)
-        - SHORT: predicted_close < predicted_open (bearish candle)
-        - HOLD: predicted_close == predicted_open (exactly equal)
-        
-        NO THRESHOLD for alignment - any movement counts
+        This is the KEY FIX - we now compare against current market price,
+        not against predicted_open.
         """
-        if pred.predicted_close > pred.predicted_open:
+        threshold = current_price * self.config.direction_threshold_pct
+        
+        if pred.predicted_close > current_price + threshold:
             return SignalDirection.LONG
-        elif pred.predicted_close < pred.predicted_open:
+        elif pred.predicted_close < current_price - threshold:
             return SignalDirection.SHORT
         else:
             return SignalDirection.HOLD
     
-    def _check_timeframe_alignment(
+    def _check_timeframe_agreement(
         self,
         predictions: Dict[str, PredictionData],
         current_price: float
     ) -> Tuple[bool, Optional[SignalDirection], str]:
         """
-        CORRECT LOGIC: Check if hourly and daily predictions ALIGN
+        FIXED: Check if both timeframes agree relative to CURRENT price
         
-        Alignment = both candles have same direction (close vs open)
-        - LONG: predicted_close > predicted_open for BOTH
-        - SHORT: predicted_close < predicted_open for BOTH
-        
-        Then check second criteria:
-        - For LONG: current_price < hourly predicted_close
-        - For SHORT: current_price > hourly predicted_close
-        
-        Returns: (aligned, direction, debug_info)
+        Returns: (agreement, direction, debug_info)
         """
         if '1 hour' not in predictions or '1 day' not in predictions:
             timeframes = list(predictions.keys())
@@ -579,31 +444,20 @@ class SignalGenerator:
         pred_1hour = predictions['1 hour']
         pred_1day = predictions['1 day']
         
-        # STEP 1: Check alignment (candle direction: close vs open)
-        direction_1hour = self._determine_direction(pred_1hour)
-        direction_1day = self._determine_direction(pred_1day)
+        direction_1hour = self._determine_direction(pred_1hour, current_price)
+        direction_1day = self._determine_direction(pred_1day, current_price)
         
         debug_info = (
-            f"1h: open=${pred_1hour.predicted_open:.2f} close=${pred_1hour.predicted_close:.2f} → {direction_1hour.value}, "
-            f"1d: open=${pred_1day.predicted_open:.2f} close=${pred_1day.predicted_close:.2f} → {direction_1day.value}, "
-            f"current=${current_price:.2f}"
+            f"1h: ${pred_1hour.predicted_close:.2f} → {direction_1hour.value}, "
+            f"1d: ${pred_1day.predicted_close:.2f} → {direction_1day.value} "
+            f"(current: ${current_price:.2f})"
         )
         
-        # Both must align (both LONG or both SHORT) and neither can be HOLD
-        if direction_1hour != direction_1day or direction_1hour == SignalDirection.HOLD:
-            return False, None, f"No alignment: {debug_info}"
+        # Both must agree and neither can be HOLD
+        if direction_1hour == direction_1day and direction_1hour != SignalDirection.HOLD:
+            return True, direction_1hour, debug_info
         
-        # STEP 2: Check second criteria (current price vs hourly predicted close)
-        if direction_1hour == SignalDirection.LONG:
-            # For LONG: current price must be below hourly predicted close
-            if current_price >= pred_1hour.predicted_close:
-                return False, None, f"LONG aligned but current ${current_price:.2f} >= hourly target ${pred_1hour.predicted_close:.2f}"
-        elif direction_1hour == SignalDirection.SHORT:
-            # For SHORT: current price must be above hourly predicted close
-            if current_price <= pred_1hour.predicted_close:
-                return False, None, f"SHORT aligned but current ${current_price:.2f} <= hourly target ${pred_1hour.predicted_close:.2f}"
-        
-        return True, direction_1hour, debug_info
+        return False, None, debug_info
     
     def _calculate_signal(
         self,
@@ -613,43 +467,48 @@ class SignalGenerator:
         market: MarketData,
         is_personal: bool
     ) -> Optional[SignalData]:
-        """
-        Calculate signal parameters
-        
-        NEW LOGIC:
-        - Target = hourly predicted_close
-        - Stop loss = entry - (ATR * 1.5) for LONG, entry + (ATR * 1.5) for SHORT
-        """
+        """Calculate signal parameters"""
         pred_1day = predictions['1 day']
-        pred_1hour = predictions['1 hour']
+        pred_1hour = predictions.get('1 hour')
         
         current_close = market.current_close
         atr = market.atr
         
         entry_price = current_close
-        target_price_1 = pred_1hour.predicted_close  # Target is hourly prediction
+        target_price_1 = pred_1day.predicted_close
         
-        # Calculate stop loss
+        # Calculate targets and stop loss
         if direction == SignalDirection.LONG:
+            if target_price_1 <= current_close:
+                return None  # Sanity check: target must be above entry for LONG
+            
+            target_price_2 = entry_price + (atr * self.config.atr_multiplier_tp2)
+            target_price_3 = entry_price + (atr * self.config.atr_multiplier_tp3)
             stop_loss = entry_price - (atr * self.config.atr_multiplier_sl)
         else:  # SHORT
+            if target_price_1 >= current_close:
+                return None  # Sanity check: target must be below entry for SHORT
+            
+            target_price_2 = entry_price - (atr * self.config.atr_multiplier_tp2)
+            target_price_3 = entry_price - (atr * self.config.atr_multiplier_tp3)
             stop_loss = entry_price + (atr * self.config.atr_multiplier_sl)
         
-        # Confidence score based on hourly prediction
-        move_pct = abs(pred_1hour.predicted_close - current_close) / current_close * 100
+        # Confidence score
+        move_pct = abs(pred_1day.predicted_close - current_close) / current_close * 100
         confidence = min(
             self.config.max_confidence,
             self.config.base_confidence + (move_pct * self.config.move_pct_multiplier)
         )
         
-        # No expiry time - signal stays active until predictions change or target/SL hit
-        time_expiry = None
+        time_expiry = datetime.now(timezone.utc) + timedelta(hours=self.config.default_expiry_hours)
         
         signal = SignalData(
             symbol=symbol,
             direction=direction,
             entry_price=entry_price,
             target_price_1=target_price_1,
+            target_price_2=target_price_2,
+            target_price_3=target_price_3,
             stop_loss=stop_loss,
             confidence_score=round(confidence, 2),
             time_expiry=time_expiry,
@@ -659,10 +518,10 @@ class SignalGenerator:
         # Link prediction IDs
         if is_personal:
             signal.personal_prediction_id_1day = pred_1day.prediction_id
-            signal.personal_prediction_id_1hour = pred_1hour.prediction_id
+            signal.personal_prediction_id_1hour = pred_1hour.prediction_id if pred_1hour else None
         else:
-            signal.daily_prediction_id = pred_1day.prediction_id
-            signal.hourly_prediction_id = pred_1hour.prediction_id
+            signal.daily_prediction_id_1day = pred_1day.prediction_id
+            signal.daily_prediction_id_1hour = pred_1hour.prediction_id if pred_1hour else None
         
         return signal
     
@@ -674,19 +533,17 @@ class SignalGenerator:
             INSERT INTO signals (
                 custom_indicator_id,
                 symbol, direction, entry_price,
-                target_price_1,
+                target_price_1, target_price_2, target_price_3,
                 stop_loss, confidence_score,
                 time_generated, time_expiry,
                 status,
-                daily_prediction_id, hourly_prediction_id,
-                personal_prediction_id, personal_prediction_id_1hour
+                daily_prediction_id, personal_prediction_id
             ) VALUES (
                 $1, $2, $3, $4,
-                $5,
-                $6, $7,
-                NOW(), $8,
-                $9,
-                $10, $11,
+                $5, $6, $7,
+                $8, $9,
+                NOW(), $10,
+                $11,
                 $12, $13
             )
             RETURNING id
@@ -700,53 +557,44 @@ class SignalGenerator:
                 signal.direction.value,
                 signal.entry_price,
                 signal.target_price_1,
+                signal.target_price_2,
+                signal.target_price_3,
                 signal.stop_loss,
                 signal.confidence_score,
                 signal.time_expiry,
                 SignalStatus.ACTIVE.value,
-                signal.daily_prediction_id,
-                signal.hourly_prediction_id,
-                signal.personal_prediction_id_1day,
-                signal.personal_prediction_id_1hour
+                signal.daily_prediction_id_1day,
+                signal.personal_prediction_id_1day
             )
         
         return signal_id
     
-    async def _check_existing_active_signal(
+    async def _check_existing_signal(
         self,
         symbol: str,
-        direction: SignalDirection,
-        is_personal: bool,
-        user_id: Optional[int] = None
+        predictions: Dict[str, PredictionData],
+        is_personal: bool
     ) -> bool:
-        """
-        Check if an active signal already exists for this symbol+direction
+        """Check if signal already exists"""
+        pred_1day = predictions.get('1 day')
+        if not pred_1day:
+            return False
         
-        NEW RULE: Only one active signal per symbol+direction
-        """
         async with self.pool.acquire() as conn:
-            if is_personal and user_id:
+            if is_personal:
                 exists = await conn.fetchval("""
                     SELECT EXISTS(
-                        SELECT 1 FROM signals s
-                        INNER JOIN personal_daily_predictions p 
-                            ON s.personal_prediction_id_1day = p.id
-                        WHERE s.symbol = $1
-                          AND s.direction = $2
-                          AND s.status = 'active'
-                          AND p.user_id = $3
+                        SELECT 1 FROM signals
+                        WHERE personal_prediction_id = $1 AND symbol = $2
                     )
-                """, symbol, direction.value, user_id)
+                """, pred_1day.prediction_id, symbol)
             else:
                 exists = await conn.fetchval("""
                     SELECT EXISTS(
                         SELECT 1 FROM signals
-                        WHERE symbol = $1
-                          AND direction = $2
-                          AND status = 'active'
-                          AND personal_prediction_id IS NULL
+                        WHERE daily_prediction_id = $1 AND symbol = $2
                     )
-                """, symbol, direction.value)
+                """, pred_1day.prediction_id, symbol)
         
         return exists
     
@@ -760,35 +608,34 @@ class SignalGenerator:
     ) -> Dict[str, Any]:
         """Complete workflow to generate signal for one symbol"""
         
+        # Check if signal already exists
+        if await self._check_existing_signal(symbol, predictions, is_personal):
+            return {
+                'success': False,
+                'reason': 'Signal already exists for this prediction'
+            }
+        
         # Get market data
         market = await self._get_market_data(symbol)
         if not market:
             return {'success': False, 'reason': 'Market data not available'}
         
-        # Check timeframe alignment
-        aligned, direction, debug_info = self._check_timeframe_alignment(
+        # Check timeframe agreement (FIXED - now passes current price)
+        agreement, direction, debug_info = self._check_timeframe_agreement(
             predictions, 
             market.current_close
         )
         
-        if not aligned:
-            logger.debug(f"{symbol}: Predictions not aligned - {debug_info}")
-            return {'success': False, 'reason': f'Predictions not aligned ({debug_info})'}
-        
-        # Check if active signal already exists for this symbol+direction
-        user_id = predictions['1 day'].user_id if is_personal else None
-        if await self._check_existing_active_signal(symbol, direction, is_personal, user_id):
-            return {
-                'success': False,
-                'reason': f'Active {direction.value} signal already exists for {symbol}'
-            }
+        if not agreement:
+            logger.debug(f"{symbol}: Timeframes disagree - {debug_info}")
+            return {'success': False, 'reason': f'Timeframes disagree ({debug_info})'}
         
         # Calculate signal
         signal = self._calculate_signal(symbol, direction, predictions, market, is_personal)
         if signal is None:
             return {
                 'success': False, 
-                'reason': 'Signal calculation failed'
+                'reason': 'Signal validation failed (target price incompatible with direction)'
             }
         
         # Save signal
@@ -816,7 +663,7 @@ class SignalGenerator:
 async def main():
     """Main execution function"""
     print("=" * 80)
-    print("SIGNAL GENERATOR (HOURLY-BASED)")
+    print("SIGNAL GENERATOR (FIXED VERSION)")
     print(f"Started: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print("=" * 80)
     
@@ -831,7 +678,6 @@ async def main():
     print(f"\nGlobal Results:")
     print(f"  Total symbols: {stats['total_symbols']}")
     print(f"  Signals generated: {stats['signals_generated']}")
-    print(f"  Signals auto-closed: {stats['signals_closed']}")
     print(f"  Signals skipped: {stats['signals_skipped']}")
     print(f"  Errors: {stats['errors']}")
     
