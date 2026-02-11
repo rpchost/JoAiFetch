@@ -1,4 +1,4 @@
-name: Daily Predictions and Signals
+name: Hourly OHLC fetch predictions signals
 
 on:
   schedule:
