@@ -1,4 +1,4 @@
-name: Daily Predictions and Signals
+name: Daily Predictions and Signals [every day]
 
 on:
   schedule:
