@@ -2,7 +2,7 @@
 # Daily/Hourly job: Generate predictions for all supported coins
 # Run once per day via GitHub Actions (e.g., at 00:15 UTC) OR hourly for 1-hour predictions
 # Usage:
-#   python generate_daily_predictions.py           # Daily mode (1 day + 1 hour predictions)
+#   python generate_daily_predictions.py           # Daily mode (1 day + 4 hours + 1 hour predictions)
 #   python generate_daily_predictions.py hourly    # Hourly mode (1 hour predictions only)
 
 import os
@@ -37,8 +37,8 @@ PRETTY_NAME = {
 }
 
 # Timeframes configuration based on mode
-TIMEFRAMES_DAILY = ["1 day", "1 hour"]  # Daily mode: both timeframes
-TIMEFRAMES_HOURLY = ["1 hour"]          # Hourly mode: only 1 hour
+TIMEFRAMES_DAILY = ["1 day", "4 hours", "1 hour"]  # Daily mode: all supported timeframes
+TIMEFRAMES_HOURLY = ["1 hour"]                     # Hourly mode: only 1 hour
 
 # =========================================
 
@@ -46,7 +46,7 @@ def get_prediction(symbol: str, timeframe: str) -> dict | None:
     """Fetch prediction from JoAI for a specific symbol + timeframe"""
     try:
         query = f"predict {symbol} next {timeframe}"
-        print(f"  [{symbol} {timeframe}] → {query}", end="", flush=True)
+        print(f"  [{symbol} {timeframe}] -> {query}", end="", flush=True)
 
         response = requests.post(
             f"{JOAI_BASE_URL}/joai",
@@ -58,13 +58,15 @@ def get_prediction(symbol: str, timeframe: str) -> dict | None:
         )
 
         if not response.ok:
-            print(f" HTTP {response.status_code}")
+            body = response.text.strip().replace("\n", " ")
+            print(f" HTTP {response.status_code}: {body[:300]}")
             return None
 
         data = response.json()
 
         if not data.get("success") or "lstm_prediction" not in data:
-            print(" No success or missing prediction")
+            error = data.get("error") or data.get("message") or "missing prediction payload"
+            print(f" API returned no prediction: {error}")
             return None
 
         pred = data["lstm_prediction"]
@@ -146,7 +148,7 @@ def main():
     if is_hourly_mode:
         print(f"Generating ONLY 1-hour predictions")
     else:
-        print(f"Generating both 1-day and 1-hour predictions")
+        print(f"Generating 1-day, 4-hour, and 1-hour predictions")
     print(f"Target date: {tomorrow}")
     print(f"Coins: {len(COINS)} | Timeframes: {', '.join(timeframes)} | Total tasks: {total_tasks}")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -186,6 +188,12 @@ def main():
         print(f"  Successful: {success_count}")
         print(f"  Skipped: {skip_count}")
         print("=" * 80)
+
+        if success_count == 0 and total_tasks > 0:
+            raise RuntimeError(
+                f"No {mode_name.lower()} predictions were generated. "
+                "The JoAI API is responding, but it did not return valid prediction data."
+            )
 
     except Exception as e:
         print(f"\nCRITICAL ERROR: {e}")

@@ -12,6 +12,7 @@ jobs:
     env:
       JOAI_BASE_URL: ${{ secrets.JOAI_BASE_URL }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PYTHONUTF8: "1"
 
     steps:
       - name: Checkout repository
