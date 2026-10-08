@@ -43,10 +43,23 @@ def get_users_with_live_adapter():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
+        try:
+            cur.execute("""
+                UPDATE user_custom_indicators
+                SET status = 'expired'
+                WHERE status = 'live'
+                  AND expires_at IS NOT NULL
+                  AND expires_at <= NOW()
+            """)
+            conn.commit()
+        except Exception as flip_error:
+            conn.rollback()
+            print(f"[EXPIRY] Failed to flip expired indicators: {flip_error}")
         cur.execute("""
             SELECT DISTINCT user_id
             FROM user_custom_indicators
             WHERE status = 'live'
+              AND (expires_at IS NULL OR expires_at > NOW())
         """)
         rows = cur.fetchall()
         cur.close()
@@ -83,13 +96,17 @@ def get_personal_prediction(user_id: int, symbol: str, timeframe: str, for_date,
 
         data = response.json()
         pred = data.get("prediction")
-        if not pred or data.get("personalized") is False:
+        if not pred:
             error = data.get("error") or data.get("message")
             if error:
                 print(f" API returned no prediction: {error}")
             else:
-                print(" Not personalized")
+                print(" No prediction")
             return None
+
+        is_personalized = bool(data.get("personalized", True))
+        if not is_personalized:
+            print(" Not personalized -> saving as fallback")
 
         print(f" Close: ${pred['close']:,.2f}")
 
@@ -102,7 +119,7 @@ def get_personal_prediction(user_id: int, symbol: str, timeframe: str, for_date,
             "predicted_low": pred["low"],
             "predicted_close": pred["close"],
             "for_date": for_date,
-            "is_personalized": True,
+            "is_personalized": is_personalized,
             "custom_indicator_id": custom_indicator_id
         }
 
@@ -128,7 +145,7 @@ def save_personal_prediction(cur, pred: dict):
             ) VALUES (
                 %(user_id)s, %(symbol)s, %(timeframe)s,
                 %(predicted_open)s, %(predicted_high)s, %(predicted_low)s, %(predicted_close)s,
-                %(for_date)s, TRUE, %(custom_indicator_id)s
+                %(for_date)s, %(is_personalized)s, %(custom_indicator_id)s
             )
             ON CONFLICT (user_id, symbol, timeframe, for_date) DO UPDATE SET
                 predicted_open = EXCLUDED.predicted_open,
@@ -136,6 +153,7 @@ def save_personal_prediction(cur, pred: dict):
                 predicted_low = EXCLUDED.predicted_low,
                 predicted_close = EXCLUDED.predicted_close,
                 predicted_at = NOW(),
+                is_personalized = EXCLUDED.is_personalized,
                 custom_indicator_id = EXCLUDED.custom_indicator_id
             RETURNING id
         """
@@ -156,6 +174,7 @@ def get_custom_indicator_id_for_user(cur, user_id: int) -> int | None:
         SELECT id
         FROM user_custom_indicators
         WHERE user_id = %s AND status = 'live'
+          AND (expires_at IS NULL OR expires_at > NOW())
         LIMIT 1
     """, (user_id,))
     row = cur.fetchone()
@@ -206,6 +225,7 @@ def main():
         task_count = 0
         success_count = 0
         skip_count = 0
+        fallback_count = 0
 
         for user_id in users:
             print(f"\n{'─' * 80}")
@@ -232,6 +252,8 @@ def main():
 
                     save_personal_prediction(cur, pred)
                     success_count += 1
+                    if not pred.get("is_personalized", True):
+                        fallback_count += 1
 
         conn.commit()
         
@@ -241,7 +263,7 @@ def main():
         print(f"  Timeframes processed: {', '.join(timeframes)}")
         print(f"  Users processed: {len(users)}")
         print(f"  Total tasks: {total_tasks}")
-        print(f"  Successful: {success_count}")
+        print(f"  Successful: {success_count} ({success_count - fallback_count} personalized, {fallback_count} fallback)")
         print(f"  Skipped: {skip_count}")
         print("=" * 80)
 
