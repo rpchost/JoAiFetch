@@ -29,6 +29,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt --no-cache-dir
+
+      # Proves the secret reached the job without printing it. A 401 from JoAI
+      # means this fingerprint does not match JoAI's JOAI_ADMIN_API_KEY.
+      - name: Verify JoAI admin secret
+        run: |
+          KEY=$(printf '%s' "$JOAI_ADMIN_API_KEY" | tr -d '[:space:]')
+          if [ -z "$KEY" ]; then
+            echo "::error::JOAI_ADMIN_API_KEY is empty - add it under Settings > Secrets and variables > Actions > Repository secrets"
+          else
+            echo "key length: ${#KEY}"
+            echo "key sha256: $(printf '%s' "$KEY" | sha256sum | cut -c1-16)"
+          fi
       
        # 0. Generate predictions for TOMORROW
       - name: Fetch OLHC data
