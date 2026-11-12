@@ -12,6 +12,8 @@ jobs:
     env:
       JOAI_BASE_URL: ${{ secrets.JOAI_BASE_URL }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # Shared secret required by JoAI's /joai and /predict-by-user endpoints.
+      JOAI_ADMIN_API_KEY: ${{ secrets.JOAI_ADMIN_API_KEY }}
 
     steps:
       - name: Checkout repository

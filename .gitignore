@@ -1,0 +1,27 @@
+# Secrets — never commit real credentials. This repository is PUBLIC.
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv311/
+venv/
+env/
+
+# Model artefacts / caches
+*.pkl
+*.pt
+*.pth
+*.h5
+.pytest_cache/
+.mypy_cache/
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db

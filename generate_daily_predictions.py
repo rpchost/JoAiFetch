@@ -17,6 +17,11 @@ load_dotenv()
 # ================= CONFIG =================
 JOAI_BASE_URL = os.getenv("JOAI_BASE_URL", "https://joai1.onrender.com").rstrip("/")
 
+# JoAI's /joai endpoint is gated by the shared admin secret (X-API-Key).
+# Without it the call returns 401 and no prediction is generated.
+JOAI_API_KEY = os.getenv("JOAI_ADMIN_API_KEY", "").strip()
+JOAI_HEADERS = {"X-API-Key": JOAI_API_KEY} if JOAI_API_KEY else {}
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL and "sslmode" not in DATABASE_URL:
     DATABASE_URL += "?sslmode=require"
@@ -54,6 +59,7 @@ def get_prediction(symbol: str, timeframe: str) -> dict | None:
                 "query": query,
                 "user_id": "daily_job"
             },
+            headers=JOAI_HEADERS,
             timeout=60
         )
 

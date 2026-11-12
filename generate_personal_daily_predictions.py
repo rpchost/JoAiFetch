@@ -16,6 +16,11 @@ load_dotenv()
 
 JOAI_BASE_URL = os.getenv("JOAI_BASE_URL", "https://joai1.onrender.com").rstrip("/")
 
+# JoAI's /predict-by-user endpoint is gated by the shared admin secret (X-API-Key).
+# Without it the call returns 401 and no personal prediction is generated.
+JOAI_API_KEY = os.getenv("JOAI_ADMIN_API_KEY", "").strip()
+JOAI_HEADERS = {"X-API-Key": JOAI_API_KEY} if JOAI_API_KEY else {}
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL and "sslmode" not in DATABASE_URL:
     DATABASE_URL += "?sslmode=require"
@@ -86,6 +91,7 @@ def get_personal_prediction(user_id: int, symbol: str, timeframe: str, for_date,
                 "symbol": symbol,
                 "timeframe": timeframe
             },
+            headers=JOAI_HEADERS,
             timeout=90
         )
 
@@ -104,9 +110,10 @@ def get_personal_prediction(user_id: int, symbol: str, timeframe: str, for_date,
                 print(" No prediction")
             return None
 
-        is_personalized = bool(data.get("personalized", True))
+        is_personalized = bool(data.get("personalized", False))
         if not is_personalized:
-            print(" Not personalized -> saving as fallback")
+            status = data.get("personalization_status", "unknown")
+            print(f" Not personalized ({status}) -> saving as fallback")
 
         print(f" Close: ${pred['close']:,.2f}")
 
