@@ -175,24 +175,20 @@ async def get_actual_candle(
         return await conn.fetchrow(query, symbol, db_timeframe, day_start, day_end)
 
 
-def calculate_accuracy(predicted_close: float, actual_close: float) -> float:
+def is_direction_correct(
+    predicted_open: float,
+    predicted_close: float,
+    actual_open: float,
+    actual_close: float
+) -> bool:
     """
-    Calculate accuracy score based on prediction error.
-    
-    Args:
-        predicted_close: Predicted closing price
-        actual_close: Actual closing price
-    
-    Returns:
-        Accuracy score between 0 and 1
+    Honest hit/miss metric: did the predicted open->close direction match reality?
+
+    The old 1 - MAPE "accuracy score" is intentionally gone: it flattered the
+    model, since a prediction can be off by thousands of dollars and still score
+    above 90%.
     """
-    if actual_close == 0:
-        return 0.0
-    
-    error = abs(predicted_close - actual_close) / actual_close
-    accuracy = max(0.0, 1.0 - error)
-    
-    return round(accuracy, 4)
+    return (predicted_close > predicted_open) == (actual_close > actual_open)
 
 
 async def update_prediction(
@@ -202,7 +198,7 @@ async def update_prediction(
     actual_high: float,
     actual_low: float,
     actual_close: float,
-    accuracy_score: float
+    direction_correct: bool
 ) -> None:
     """
     Update a prediction with actual values and mark it as resolved.
@@ -214,7 +210,7 @@ async def update_prediction(
         actual_high: Actual high price
         actual_low: Actual low price
         actual_close: Actual closing price
-        accuracy_score: Calculated accuracy score
+        direction_correct: Whether the predicted direction matched reality
     """
     query = """
         UPDATE daily_predictions
@@ -223,7 +219,7 @@ async def update_prediction(
             actual_high = $2,
             actual_low = $3,
             actual_close = $4,
-            accuracy_score = $5,
+            direction_correct = $5,
             resolved_at = NOW()
         WHERE id = $6
     """
@@ -231,7 +227,7 @@ async def update_prediction(
     await conn.execute(
         query,
         actual_open, actual_high, actual_low, actual_close,
-        accuracy_score, prediction_id
+        direction_correct, prediction_id
     )
 
 
@@ -380,16 +376,20 @@ async def resolve_predictions_for_timeframe(
         actual_low = float(actual_candle['low'])
         actual_close = float(actual_candle['close'])
         
-        # Calculate accuracy
+        # Honest metric: did the predicted direction match reality?
+        pred_open = float(pred['predicted_open'])
         pred_close = float(pred['predicted_close'])
-        accuracy = calculate_accuracy(pred_close, actual_close)
+        direction_correct = is_direction_correct(
+            pred_open, pred_close,
+            actual_open, actual_close
+        )
         
         # Update prediction with actual values
         await update_prediction(
             conn,
             pred['id'],
             actual_open, actual_high, actual_low, actual_close,
-            accuracy
+            direction_correct
         )
         
         # CRITICAL: Only resolve signals for 1-day predictions
@@ -403,9 +403,6 @@ async def resolve_predictions_for_timeframe(
                 target_date
             )
         
-        # Determine direction correctness
-        pred_open = float(pred['predicted_open'])
-        direction_correct = (pred_close > pred_open) == (actual_close > actual_open)
         arrow = "↑" if direction_correct else "↓"
         
         # Log result
@@ -413,7 +410,7 @@ async def resolve_predictions_for_timeframe(
         logger.info(
             f"  ✓ [{coin_name} {timeframe}] "
             f"Predicted: ${pred_close:,.2f} | Actual: ${actual_close:,.2f} | "
-            f"Accuracy: {accuracy:.1%} {arrow}{signal_info}"
+            f"Direction: {'correct' if direction_correct else 'wrong'} {arrow}{signal_info}"
         )
         
         resolved_count += 1

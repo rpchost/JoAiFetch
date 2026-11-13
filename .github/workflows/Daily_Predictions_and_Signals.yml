@@ -41,6 +41,11 @@ jobs:
             echo "key sha256: $(printf '%s' "$KEY" | sha256sum | cut -c1-16)"
           fi
 
+      # 0. Refresh candles first: without the just-closed daily candle the model
+      #    sees a window that ends two days back and repeats yesterday's output.
+      - name: Fetch fresh OHLC
+        run: python fetch_data.py
+
        # 1. Generate predictions for TOMORROW
       - name: Generate Global Predictions
         run: python generate_daily_predictions.py

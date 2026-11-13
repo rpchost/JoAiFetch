@@ -9,7 +9,7 @@ import os
 import sys
 import requests
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -44,6 +44,36 @@ PRETTY_NAME = {
 # Timeframes configuration based on mode
 TIMEFRAMES_DAILY = ["1 day", "4 hours", "1 hour"]  # Daily mode: all supported timeframes
 TIMEFRAMES_HOURLY = ["1 hour"]                     # Hourly mode: only 1 hour
+
+TF_SLUG = {"1 hour": "1hour", "4 hours": "4hours", "1 day": "1day"}
+
+# The model is deterministic: if its input window still ends on the same candle
+# as yesterday's run, it emits yesterday's prediction verbatim. That is exactly
+# how identical rows appeared on consecutive days, so refuse stale windows.
+MAX_CANDLE_AGE_HOURS = {"1 hour": 12, "4 hours": 12, "1 day": 36}
+
+
+def stale_windows(cur, symbols, timeframes):
+    """Return [(symbol, timeframe, age_hours)] whose newest candle is too old."""
+    now = datetime.now(timezone.utc)
+    stale = []
+    for symbol in symbols:
+        for tf in timeframes:
+            cur.execute(
+                "SELECT MAX(timestamp) FROM crypto_candles WHERE symbol = %s AND timeframe = %s",
+                (symbol, TF_SLUG[tf]),
+            )
+            row = cur.fetchone()
+            last = row[0] if row else None
+            if last is None:
+                stale.append((symbol, tf, None))
+                continue
+            if last.tzinfo is not None:
+                last = last.astimezone(timezone.utc).replace(tzinfo=None)
+            age = (now.replace(tzinfo=None) - last).total_seconds() / 3600
+            if age > MAX_CANDLE_AGE_HOURS[tf]:
+                stale.append((symbol, tf, round(age, 1)))
+    return stale
 
 # =========================================
 
@@ -164,6 +194,15 @@ def main():
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
 
+        stale = stale_windows(cur, COINS, timeframes)
+        if stale:
+            for symbol, tf, age in stale:
+                print(f"  ✗ stale candle window: {symbol} {tf} (newest candle {age}h old)")
+            raise RuntimeError(
+                "Refusing to generate predictions from stale candles: the model would "
+                "simply repeat the previous run's output. Fetch fresh OHLC first."
+            )
+
         task_count = 0
         success_count = 0
         skip_count = 0
@@ -225,7 +264,7 @@ if __name__ == "__main__":
 # import os
 # import requests
 # import psycopg2
-# from datetime import datetime, timedelta
+# from datetime import datetime, timedelta, timezone
 # from dotenv import load_dotenv
 
 # load_dotenv()
