@@ -64,6 +64,46 @@ jobs:
       - name: Resolve Personal Predictions
         run: python resolve_personal_daily_predictions.py
 
+      # 4. Retrain personal adapters on today's resolved data. This used to be a
+      #    Render cron (joai-adapter-retrainer-daily); all scheduling now lives in
+      #    GitHub Actions so Render runs no cron jobs. Training executes inside the
+      #    JoAI web service, which owns the model checkpoints and the DB.
+      - name: Retrain Personal Adapters
+        if: success()
+        run: |
+          set -euo pipefail
+          KEY=$(printf '%s' "$JOAI_ADMIN_API_KEY" | tr -d '[:space:]')
+          BASE=${JOAI_BASE_URL%/}
+
+          echo "Starting adapter retrain"
+          code=$(curl -sS -o /tmp/retrain_start.json -w '%{http_code}' -X POST             -H "X-API-Key: $KEY" -H 'Content-Type: application/json'             "$BASE/admin/retrain-adapters")
+          cat /tmp/retrain_start.json; echo
+          if [ "$code" != "200" ] && [ "$code" != "202" ]; then
+            echo "::error::/admin/retrain-adapters returned HTTP $code"
+            exit 1
+          fi
+
+          # Poll until the background training thread reports completion.
+          for i in $(seq 1 40); do
+            sleep 30
+            curl -sS -H "X-API-Key: $KEY" "$BASE/admin/retrain-adapters/status" -o /tmp/retrain_status.json
+            cat /tmp/retrain_status.json; echo
+            running=$(python3 -c "import json;print(str(json.load(open('/tmp/retrain_status.json')).get('running')).lower())")
+            err=$(python3 -c "import json;print(json.load(open('/tmp/retrain_status.json')).get('error') or '')")
+            if [ -n "$err" ]; then
+              echo "::error::Adapter retrain failed: $err"
+              exit 1
+            fi
+            if [ "$running" = "false" ]; then
+              echo "Adapter retrain finished"
+              break
+            fi
+            if [ "$i" = "40" ]; then
+              echo "::error::Adapter retrain still running after 20 minutes"
+              exit 1
+            fi
+          done
+
       - name: Commit log update (optional - if you want to track logs in repo)
         if: success()
         run: |
