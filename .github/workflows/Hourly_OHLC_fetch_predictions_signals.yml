@@ -56,6 +56,10 @@ jobs:
       # 2. Generate signals from TOMORROW's predictions (unresolved)
       - name: Generate Signals
         run: python generate_signals.py
+
+      # Close any signal whose target, stop or deadline has been reached.
+      - name: Resolve Open Signals
+        run: python resolve_signals.py
       
       - name: Commit log update (optional - if you want to track logs in repo)
         if: success()

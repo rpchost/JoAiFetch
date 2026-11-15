@@ -31,6 +31,8 @@ from dataclasses import dataclass
 import asyncpg
 from dotenv import load_dotenv
 
+from signal_outcomes import LOGIC_VERSION, realized_r
+
 load_dotenv()
 
 logging.basicConfig(
@@ -57,7 +59,8 @@ class SignalStatus(Enum):
     EXPIRED = "expired"
     CANCELLED = "cancelled"
     CLOSED = "closed"
-    PREDICTION_CHANGED = "prediction_changed"  # NEW: auto-closed due to prediction change
+    # Auto-closed signals use CLOSED plus exit_reason=prediction_changed;
+    # status_enum has no prediction_changed member.
 
 
 # ==================== DATA CLASSES ====================
@@ -66,9 +69,22 @@ class SignalStatus(Enum):
 class SignalConfig:
     """Configuration for signal generation and risk management"""
     
-    # Risk management - ATR multipliers
+    # Risk management - ATR multipliers, both on the 1-hour series the signal
+    # targets. Target and stop are symmetrical by construction, so reward:risk
+    # is always atr_multiplier_tp / atr_multiplier_sl and the model contributes
+    # direction only (its predicted close sits far too close to entry to serve
+    # as a profit target).
     atr_multiplier_sl: float = 1.5
-    
+    atr_multiplier_tp: float = 2.0
+
+    # Refuse to build a signal from a candle older than this. fetch_data.py runs
+    # immediately before signal generation, so a stale candle means the feed is
+    # broken; emitting an entry the market already left would be dishonest.
+    market_data_max_age_hours: float = 3.0
+
+    # Horizon of a signal. Whatever is neither at target nor at stop by then is
+    # closed as expired and marked to market, so no signal stays open forever.
+    signal_expiry_hours: float = 4.0
     # Confidence calculation
     base_confidence: float = 50.0
     move_pct_multiplier: float = 10.0
@@ -120,6 +136,8 @@ class SignalData:
     stop_loss: Optional[float] = None
     confidence_score: float = 50.0
     time_expiry: Optional[datetime] = None
+    entry_candle_ts: Optional[datetime] = None
+    atr_at_entry: Optional[float] = None
     custom_indicator_id: Optional[int] = None
     daily_prediction_id: Optional[int] = None
     hourly_prediction_id: Optional[int] = None
@@ -292,10 +310,12 @@ class SignalGenerator:
                     query = """
                         SELECT 
                             s.id, s.symbol, s.direction,
+                            s.entry_price, s.stop_loss,
                             s.daily_prediction_id, s.hourly_prediction_id
                         FROM signals s
                         WHERE s.status = 'active'
                           AND s.personal_prediction_id IS NULL
+                          AND s.logic_version >= 2
                     """
                     params = []
                     
@@ -308,11 +328,13 @@ class SignalGenerator:
                     query = """
                         SELECT 
                             s.id, s.symbol, s.direction,
+                            s.entry_price, s.stop_loss,
                             s.personal_prediction_id_1day, s.personal_prediction_id_1hour
                         FROM signals s
                         INNER JOIN personal_daily_predictions p ON s.personal_prediction_id_1day = p.id
                         WHERE s.status = 'active'
                           AND p.user_id = $1
+                          AND s.logic_version >= 2
                     """
                     params = [user_id]
                     
@@ -366,14 +388,29 @@ class SignalGenerator:
                 
                 # Close signal if misaligned
                 if should_close:
+                    exit_price = market.current_close
+                    r_multiple = None
+                    if signal['entry_price'] is not None and signal['stop_loss'] is not None:
+                        r_multiple = realized_r(
+                            signal['direction'],
+                            float(signal['entry_price']),
+                            float(signal['stop_loss']),
+                            exit_price,
+                        )
                     async with self.pool.acquire() as conn:
                         await conn.execute("""
                             UPDATE signals
-                            SET 
+                            SET
                                 status = $1,
+                                exit_price = $2,
+                                exit_reason = $3,
+                                resolved_at = NOW(),
+                                realized_r = $4,
                                 updated_at = NOW()
-                            WHERE id = $2
-                        """, SignalStatus.PREDICTION_CHANGED.value, signal_id)
+                            WHERE id = $5
+                        """,
+                        SignalStatus.CLOSED.value, exit_price,
+                        'prediction_changed', r_multiple, signal_id)
                     
                     stats['closed'] += 1
                     logger.info(f"⚠️ Auto-closed signal #{signal_id} ({symbol} {signal_direction}): {reason}")
@@ -509,28 +546,58 @@ class SignalGenerator:
     # ==================== MARKET DATA ====================
     
     async def _get_market_data(self, symbol: str) -> Optional[MarketData]:
-        """Fetch latest market data for a symbol"""
+        """
+        Latest 1-hour candle: the price the market is trading at right now.
+
+        Entry and stop-loss ATR must both come from the 1-hour series the signal
+        targets, never from the daily candle (up to 24h stale, and its ATR is ~5x
+        too wide for an hourly target). Returns None rather than pricing a signal
+        off missing or stale data.
+        """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("""
+            row = await conn.fetchrow(
+                """
                 SELECT close, atr, timestamp
                 FROM crypto_candles
-                WHERE symbol = $1 
-                  AND timeframe = '1day'
-                ORDER BY timestamp DESC
+                WHERE symbol = $1
+                  AND timeframe = '1hour'
+                  AND close > 0 AND atr > 0
+                ORDER BY timestamp DESC, id DESC
                 LIMIT 1
-            """, symbol)
-        
-        if not row or row['close'] is None or row['atr'] is None or row['atr'] <= 0:
-            logger.warning(f"Market data unavailable or invalid for {symbol}")
+                """,
+                symbol,
+            )
+
+        if not row:
+            logger.warning(f"{symbol}: no usable 1-hour candle")
             return None
-        
+
+        candle_timestamp = row['timestamp']
+        age_hours = (
+            datetime.now(timezone.utc) - candle_timestamp
+        ).total_seconds() / 3600
+        if age_hours > self.config.market_data_max_age_hours:
+            logger.warning(
+                f"{symbol}: stale 1-hour candle "
+                f"({candle_timestamp.strftime('%Y-%m-%d %H:%M')} UTC, "
+                f"{age_hours:.1f}h old, limit "
+                f"{self.config.market_data_max_age_hours}h) - skipping signal"
+            )
+            return None
+
+        logger.info(
+            f"{symbol}: 1-hour candle "
+            f"{candle_timestamp.strftime('%Y-%m-%d %H:%M')} UTC, "
+            f"close ${float(row['close']):.2f}, atr ${float(row['atr']):.2f}"
+        )
+
         return MarketData(
             symbol=symbol,
             current_close=float(row['close']),
             atr=float(row['atr']),
-            timestamp=row['timestamp']
+            timestamp=candle_timestamp
         )
-    
+
     # ==================== SIGNAL CALCULATION ====================
     
     def _determine_direction(
@@ -617,8 +684,10 @@ class SignalGenerator:
         Calculate signal parameters
         
         NEW LOGIC:
-        - Target = hourly predicted_close
-        - Stop loss = entry - (ATR * 1.5) for LONG, entry + (ATR * 1.5) for SHORT
+        - Entry = latest 1-hour close (the price the market is trading at)
+        - Target = entry +/- ATR_1h * atr_multiplier_tp
+        - Stop loss = entry -/+ ATR_1h * atr_multiplier_sl
+        - Fixed horizon (signal_expiry_hours), resolved from 1-hour candles
         """
         pred_1day = predictions['1 day']
         pred_1hour = predictions['1 hour']
@@ -627,13 +696,30 @@ class SignalGenerator:
         atr = market.atr
         
         entry_price = current_close
-        target_price_1 = pred_1hour.predicted_close  # Target is hourly prediction
         
-        # Calculate stop loss
+        # Target and stop both derive from the same 1-hour ATR, so reward:risk is
+        # fixed by configuration instead of depending on how far the model
+        # happened to predict.
         if direction == SignalDirection.LONG:
             stop_loss = entry_price - (atr * self.config.atr_multiplier_sl)
+            target_price_1 = entry_price + (atr * self.config.atr_multiplier_tp)
         else:  # SHORT
             stop_loss = entry_price + (atr * self.config.atr_multiplier_sl)
+            target_price_1 = entry_price - (atr * self.config.atr_multiplier_tp)
+        
+        # Invariant: if the geometry stops being symmetrical the configuration
+        # is inconsistent and nothing may be published.
+        risk_distance = abs(entry_price - stop_loss)
+        reward_distance = abs(target_price_1 - entry_price)
+        expected_rr = self.config.atr_multiplier_tp / self.config.atr_multiplier_sl
+        actual_rr = reward_distance / risk_distance if risk_distance > 0 else 0.0
+        if abs(actual_rr - expected_rr) > 0.01:
+            logger.error(
+                f"{symbol}: reward:risk {actual_rr:.3f} does not match the "
+                f"configured {expected_rr:.3f} (entry {entry_price:.2f}, target "
+                f"{target_price_1:.2f}, stop {stop_loss:.2f}) - not publishing"
+            )
+            return None
         
         # Confidence score based on hourly prediction
         move_pct = abs(pred_1hour.predicted_close - current_close) / current_close * 100
@@ -642,8 +728,10 @@ class SignalGenerator:
             self.config.base_confidence + (move_pct * self.config.move_pct_multiplier)
         )
         
-        # No expiry time - signal stays active until predictions change or target/SL hit
-        time_expiry = None
+        # Every signal has a deadline; the resolver expires what is untouched
+        time_expiry = datetime.now(timezone.utc) + timedelta(
+            hours=self.config.signal_expiry_hours
+        )
         
         signal = SignalData(
             symbol=symbol,
@@ -653,6 +741,8 @@ class SignalGenerator:
             stop_loss=stop_loss,
             confidence_score=round(confidence, 2),
             time_expiry=time_expiry,
+            entry_candle_ts=market.timestamp,
+            atr_at_entry=atr,
             custom_indicator_id=pred_1day.custom_indicator_id if is_personal else None
         )
         
@@ -679,7 +769,8 @@ class SignalGenerator:
                 time_generated, time_expiry,
                 status,
                 daily_prediction_id, hourly_prediction_id,
-                personal_prediction_id, personal_prediction_id_1hour
+                personal_prediction_id, personal_prediction_id_1hour,
+                entry_candle_ts, atr_at_entry, logic_version
             ) VALUES (
                 $1, $2, $3, $4,
                 $5,
@@ -687,7 +778,8 @@ class SignalGenerator:
                 NOW(), $8,
                 $9,
                 $10, $11,
-                $12, $13
+                $12, $13,
+                $14, $15, $16
             )
             RETURNING id
         """
@@ -707,7 +799,10 @@ class SignalGenerator:
                 signal.daily_prediction_id,
                 signal.hourly_prediction_id,
                 signal.personal_prediction_id_1day,
-                signal.personal_prediction_id_1hour
+                signal.personal_prediction_id_1hour,
+                signal.entry_candle_ts,
+                signal.atr_at_entry,
+                LOGIC_VERSION
             )
         
         return signal_id
@@ -797,7 +892,7 @@ class SignalGenerator:
             logger.info(
                 f"✅ Generated signal for {symbol}: {signal.direction.value} @ "
                 f"${signal.entry_price:.2f} → ${signal.target_price_1:.2f} "
-                f"(confidence: {signal.confidence_score}%)"
+                f"(SL ${signal.stop_loss:.2f}, confidence: {signal.confidence_score}%)"
             )
             return {
                 'success': True,
