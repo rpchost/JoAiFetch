@@ -9,6 +9,9 @@ on:
 jobs:
   generate-predictions:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the commit-log step pushes to the repo
+      issues: write     # the failure alert opens or comments on an issue
     env:
       JOAI_BASE_URL: ${{ secrets.JOAI_BASE_URL }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -117,3 +120,20 @@ jobs:
           git diff --quiet && echo "No changes to commit" || (git commit -m "Update daily predictions log - $(date -u +'%Y-%m-%d')" && git push)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tell the owner instead of nobody noticing a silent stop.
+      - name: Alert on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          TITLE="Workflow failing: ${{ github.workflow }}"
+          BODY="Run #${{ github.run_number }} failed on ${{ github.sha }} (${{ github.event_name }}): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          NUMBER=$(gh issue list --state open --limit 100 --json number,title | python3 -c "import json,sys; t=sys.argv[1]; print(next((i['number'] for i in json.load(sys.stdin) if i['title']==t), ''))" "$TITLE" || true)
+          if [ -n "${NUMBER:-}" ]; then
+            echo "Commenting on tracking issue #$NUMBER"
+            gh issue comment "$NUMBER" --body "$BODY" || echo "::warning::Could not comment on issue #$NUMBER - see the run log"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" || echo "::warning::Could not open an issue (are Issues enabled?) - see the run log"
+          fi

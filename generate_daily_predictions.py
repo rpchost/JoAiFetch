@@ -50,7 +50,17 @@ TF_SLUG = {"1 hour": "1hour", "4 hours": "4hours", "1 day": "1day"}
 # The model is deterministic: if its input window still ends on the same candle
 # as yesterday's run, it emits yesterday's prediction verbatim. That is exactly
 # how identical rows appeared on consecutive days, so refuse stale windows.
-MAX_CANDLE_AGE_HOURS = {"1 hour": 12, "4 hours": 12, "1 day": 36}
+#
+# fetch_data.py stores closed candles only, so the newest candle of a timeframe
+# is legitimately up to one full interval old (today's daily candle is written
+# tomorrow). Allow two intervals: that covers the normal gap plus one missed
+# run, and still catches a feed that is genuinely dead.
+TF_INTERVAL_HOURS = {"1 hour": 1, "4 hours": 4, "1 day": 24}
+
+
+def max_candle_age_hours(timeframe: str) -> float:
+    """Oldest acceptable age for the newest candle of a timeframe."""
+    return 2 * TF_INTERVAL_HOURS[timeframe]
 
 
 def stale_windows(cur, symbols, timeframes):
@@ -71,7 +81,7 @@ def stale_windows(cur, symbols, timeframes):
             if last.tzinfo is not None:
                 last = last.astimezone(timezone.utc).replace(tzinfo=None)
             age = (now.replace(tzinfo=None) - last).total_seconds() / 3600
-            if age > MAX_CANDLE_AGE_HOURS[tf]:
+            if age > max_candle_age_hours(tf):
                 stale.append((symbol, tf, round(age, 1)))
     return stale
 
@@ -197,7 +207,11 @@ def main():
         stale = stale_windows(cur, COINS, timeframes)
         if stale:
             for symbol, tf, age in stale:
-                print(f"  ✗ stale candle window: {symbol} {tf} (newest candle {age}h old)")
+                limit = max_candle_age_hours(tf)
+                print(
+                    f"  ✗ stale candle window: {symbol} {tf} "
+                    f"(newest candle {age}h old, limit {limit}h)"
+                )
             raise RuntimeError(
                 "Refusing to generate predictions from stale candles: the model would "
                 "simply repeat the previous run's output. Fetch fresh OHLC first."
