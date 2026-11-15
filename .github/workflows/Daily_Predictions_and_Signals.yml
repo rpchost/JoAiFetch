@@ -80,20 +80,32 @@ jobs:
         run: |
           set -euo pipefail
           KEY=$(printf '%s' "$JOAI_ADMIN_API_KEY" | tr -d '[:space:]')
-          BASE=${JOAI_BASE_URL%/}
+          # Strip spaces and EVERY trailing slash: the endpoint answers only on
+          # /admin/retrain-adapters - a trailing slash returns HTTP 307.
+          BASE=$(printf '%s' "$JOAI_BASE_URL" | tr -d '[:space:]' | sed 's:/*$::')
+          URL="$BASE/admin/retrain-adapters"
+          echo "POST $URL"
 
-          echo "Starting adapter retrain"
-          code=$(curl -sS -o /tmp/retrain_start.json -w '%{http_code}' -X POST             -H "X-API-Key: $KEY" -H 'Content-Type: application/json'             "$BASE/admin/retrain-adapters")
+          # --location keeps POST across a 307/308 canonical redirect, and -D
+          # dumps the headers so a redirect is visible in the log instead of
+          # only showing up as an unexplained status code.
+          code=$(curl -sS --location -D /tmp/retrain_start.headers             -o /tmp/retrain_start.json -w '%{http_code}'             -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json'             "$URL")
+          grep -iE '^(HTTP/|location:)' /tmp/retrain_start.headers || true
           cat /tmp/retrain_start.json; echo
+
           if [ "$code" != "200" ] && [ "$code" != "202" ]; then
-            echo "::error::/admin/retrain-adapters returned HTTP $code"
+            echo "::error::$URL returned HTTP $code"
             exit 1
           fi
+          # A redirect onto an HTML page also returns 200, so insist on a JSON
+          # body that actually accepted the job.
+          python3 -c "import json,sys; d=json.load(open('/tmp/retrain_start.json')); sys.exit(0 if isinstance(d,dict) and (d.get('success') or d.get('running')) else 1)"             || { echo "::error::$URL did not accept the retrain (unexpected body)"; exit 1; }
+          echo "Retrain accepted"
 
           # Poll until the background training thread reports completion.
           for i in $(seq 1 40); do
             sleep 30
-            curl -sS -H "X-API-Key: $KEY" "$BASE/admin/retrain-adapters/status" -o /tmp/retrain_status.json
+            curl -sS --location -H "X-API-Key: $KEY" "$BASE/admin/retrain-adapters/status" -o /tmp/retrain_status.json
             cat /tmp/retrain_status.json; echo
             running=$(python3 -c "import json;print(str(json.load(open('/tmp/retrain_status.json')).get('running')).lower())")
             err=$(python3 -c "import json;print(json.load(open('/tmp/retrain_status.json')).get('error') or '')")
