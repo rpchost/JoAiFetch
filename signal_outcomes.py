@@ -1,11 +1,10 @@
 """Signal outcome logic: pure functions, no database access.
 
-A signal is created from a 1-hour candle close and lives for a fixed horizon
-(``SignalConfig.signal_expiry_hours``). Its result is decided by walking the
-1-hour candles that follow, in order: whichever level price touches first wins.
-If neither is touched by the deadline, the signal expires and is marked to
-market at the last known close, so its result is still measurable instead of
-sitting "active" forever.
+A signal is created from a 1-hour candle close and has no deadline. Its result is
+decided by walking the 1-hour candles that follow, in order: whichever level
+price touches first wins. A signal that touches neither level stays open and is
+re-checked on the next run. Passing ``expires_at`` still enables the old
+fixed-horizon behaviour for callers that want it.
 
 Ambiguity rule: when a single 1-hour candle reaches both the target and the stop,
 the order is unknowable from 1-hour data. Such a candle is never booked as a win
@@ -139,8 +138,9 @@ def evaluate_position(
                 resolved_at=timestamp,
             )
 
-    # Nothing touched. Expired once the deadline passes; still open before that.
-    if expires_at is not None and now < expires_at:
+    # Nothing touched. With no deadline the signal stays open; with one it expires
+    # once that deadline has passed.
+    if expires_at is None or now < expires_at:
         return None
 
     return SignalOutcome(

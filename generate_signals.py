@@ -82,8 +82,8 @@ class SignalConfig:
     # broken; emitting an entry the market already left would be dishonest.
     market_data_max_age_hours: float = 3.0
 
-    # Horizon of a signal. Whatever is neither at target nor at stop by then is
-    # closed as expired and marked to market, so no signal stays open forever.
+    # Kept for compatibility only. Signals no longer expire by the clock, so
+    # this value is not written to time_expiry any more.
     signal_expiry_hours: float = 4.0
     # Confidence calculation
     base_confidence: float = 50.0
@@ -361,8 +361,8 @@ class SignalGenerator:
                 
                 preds = predictions[symbol]
                 
-                # Check if we have both timeframes
-                if '1 hour' not in preds or '1 day' not in preds:
+                # Flip rule needs both views: the 1-hour and the 4-hour prediction.
+                if '1 hour' not in preds or '4 hours' not in preds:
                     continue
                 
                 # Get market data
@@ -372,22 +372,22 @@ class SignalGenerator:
                 
                 # Check if predictions still align with signal
                 hourly_direction = self._determine_direction(preds['1 hour'])
-                daily_direction = self._determine_direction(preds['1 day'])
-                
-                should_close = False
-                
-                # Close if hourly prediction disagrees
-                if hourly_direction.value != signal_direction:
-                    should_close = True
-                    reason = f"Hourly prediction changed to {hourly_direction.value}"
-                
-                # Close if daily prediction disagrees
-                elif daily_direction.value != signal_direction:
-                    should_close = True
-                    reason = f"Daily prediction changed to {daily_direction.value}"
-                
-                # Close signal if misaligned
+                four_hour_direction = self._determine_direction(preds['4 hours'])
+
+                # Close only when BOTH the 1-hour and the 4-hour prediction point
+                # against the position. One timeframe disagreeing is not enough:
+                # it flips back too easily and would close trades that were fine.
+                should_close = (
+                    hourly_direction.value != signal_direction
+                    and four_hour_direction.value != signal_direction
+                )
+
+                # Close signal if both timeframes are against it
                 if should_close:
+                    reason = (
+                        f"1h {hourly_direction.value} and 4h "
+                        f"{four_hour_direction.value} both against {signal_direction}"
+                    )
                     exit_price = market.current_close
                     r_multiple = None
                     if signal['entry_price'] is not None and signal['stop_loss'] is not None:
@@ -435,7 +435,7 @@ class SignalGenerator:
                 for_date
             FROM daily_predictions
             WHERE resolved_at IS NULL
-              AND timeframe IN ('1 hour', '1 day')
+              AND timeframe IN ('1 hour', '4 hours', '1 day')
         """
         params = []
         
@@ -475,7 +475,7 @@ class SignalGenerator:
             FROM personal_daily_predictions
             WHERE resolved_at IS NULL
               AND user_id = $1
-              AND timeframe IN ('1 hour', '1 day')
+              AND timeframe IN ('1 hour', '4 hours', '1 day')
         """
         params = [user_id]
         
@@ -687,7 +687,7 @@ class SignalGenerator:
         - Entry = latest 1-hour close (the price the market is trading at)
         - Target = entry +/- ATR_1h * atr_multiplier_tp
         - Stop loss = entry -/+ ATR_1h * atr_multiplier_sl
-        - Fixed horizon (signal_expiry_hours), resolved from 1-hour candles
+        - No time horizon: a signal ends only at target, at stop, or on a flip
         """
         pred_1day = predictions['1 day']
         pred_1hour = predictions['1 hour']
@@ -728,10 +728,10 @@ class SignalGenerator:
             self.config.base_confidence + (move_pct * self.config.move_pct_multiplier)
         )
         
-        # Every signal has a deadline; the resolver expires what is untouched
-        time_expiry = datetime.now(timezone.utc) + timedelta(
-            hours=self.config.signal_expiry_hours
-        )
+        # No deadline. A signal stays open until price touches its target or
+        # stop, or until the predictions behind it flip. time_expiry is written
+        # as NULL so nothing downstream can expire it by the clock.
+        time_expiry = None
         
         signal = SignalData(
             symbol=symbol,

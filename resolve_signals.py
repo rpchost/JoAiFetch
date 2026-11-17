@@ -2,10 +2,10 @@
 #
 # Runs right after signal generation in both workflows. For every open signal
 # written by the current logic it walks the 1-hour candles after the entry and
-# records the first level touched (target or stop), or expires the signal at its
-# deadline and marks it to market. The evaluation itself lives in
-# signal_outcomes.py and is database-free; this file only loads candles and
-# writes results.
+# records the first level touched (target or stop). Signals have no deadline, so
+# one that touches neither level stays open and is simply re-checked next run.
+# The evaluation itself lives in signal_outcomes.py and is database-free; this
+# file only loads candles and writes results.
 
 """Resolve open signals into measured outcomes."""
 
@@ -34,10 +34,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CANDLE_TIMEFRAME = "1hour"
-
-# Fallback horizon for a signal whose time_expiry was never written. The
-# generator always writes it; this only keeps the resolver self-sufficient.
-DEFAULT_EXPIRY_HOURS = 4.0
 
 ACTIVE_QUERY = """
     SELECT
@@ -82,17 +78,12 @@ UPDATE_QUERY = """
 class SignalResolver:
     """Resolve open signals from stored 1-hour candles."""
 
-    def __init__(
-        self,
-        database_url: Optional[str] = None,
-        expiry_hours: float = DEFAULT_EXPIRY_HOURS,
-    ):
+    def __init__(self, database_url: Optional[str] = None):
         self.database_url = database_url or os.getenv("DATABASE_URL")
         if not self.database_url:
             raise ValueError("DATABASE_URL not found in environment variables")
         if "sslmode" not in self.database_url:
             self.database_url += "?sslmode=require"
-        self.expiry_hours = expiry_hours
         self.pool: Optional[asyncpg.Pool] = None
 
     async def initialize(self) -> None:
@@ -181,16 +172,15 @@ class SignalResolver:
     ) -> Optional[SignalOutcome]:
         """Load the signal's candles, evaluate, and persist the outcome."""
         entry_candle_ts = row["entry_candle_ts"] or row["time_generated"]
-        expires_at = row["time_expiry"] or (
-            row["time_generated"] + timedelta(hours=self.expiry_hours)
-        )
 
+        # No deadline: time_expiry is ignored, so a signal is decided only when
+        # price reaches its target or its stop. Untouched signals stay open.
         candles: List[Tuple[Any, ...]] = await conn.fetch(
             CANDLE_QUERY,
             row["symbol"],
             CANDLE_TIMEFRAME,
             entry_candle_ts,
-            expires_at,
+            now,
         )
 
         outcome = evaluate_position(
@@ -201,13 +191,13 @@ class SignalResolver:
             else None,
             stop_loss=float(row["stop_loss"]) if row["stop_loss"] is not None else None,
             entry_candle_ts=entry_candle_ts,
-            expires_at=expires_at,
+            expires_at=None,
             candles=[tuple(c) for c in candles],
             now=now,
         )
 
         if outcome is None:
-            logger.debug(f"Signal #{row['id']} still open (expires {expires_at:%Y-%m-%d %H:%M} UTC)")
+            logger.debug(f"Signal #{row['id']} still open (no deadline)")
             return None
 
         r_multiple = realized_r(
