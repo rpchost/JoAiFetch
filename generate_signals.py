@@ -375,14 +375,20 @@ class SignalGenerator:
                 four_hour_direction = self._determine_direction(preds['4 hours'])
 
                 # Close only when BOTH the 1-hour and the 4-hour prediction point
-                # against the position. One timeframe disagreeing is not enough:
-                # it flips back too easily and would close trades that were fine.
+                # the other way. One timeframe disagreeing is not enough: it flips
+                # back too easily and would close trades that were fine.
+                # HOLD is no view (predicted_close == predicted_open), so the rule
+                # names the opposite direction: a flat forecast cannot match it.
+                opposite = (
+                    SignalDirection.SHORT
+                    if signal_direction == SignalDirection.LONG.value
+                    else SignalDirection.LONG
+                )
                 should_close = (
-                    hourly_direction.value != signal_direction
-                    and four_hour_direction.value != signal_direction
+                    hourly_direction == opposite
+                    and four_hour_direction == opposite
                 )
 
-                # Close signal if both timeframes are against it
                 if should_close:
                     reason = (
                         f"1h {hourly_direction.value} and 4h "
